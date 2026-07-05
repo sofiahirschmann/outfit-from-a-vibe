@@ -1,0 +1,16 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env*.local
+data/catalog-raw.jsonl
+data/.sitemap-cache.json
+data/.dd-cookies.txt
+.DS_Store
+*.tsbuildinfo
+
+# internal working docs — not for the public repo
+CLAUDE.md
+HANDOFF.md
+PLAN.md

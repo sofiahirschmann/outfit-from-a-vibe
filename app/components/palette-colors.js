@@ -1,0 +1,23 @@
+// Palette family → swatch color for the little chips under each look.
+export const PALETTE_COLORS = {
+  black: '#1a1a1a',
+  white: '#f8f8f5',
+  cream: '#f1e8d2',
+  beige: '#d9c49a',
+  brown: '#7a5230',
+  gray: '#8d8d8d',
+  navy: '#232f4b',
+  blue: '#3a6ea5',
+  denim: '#5b7699',
+  green: '#3e6b45',
+  olive: '#6d6b35',
+  red: '#c22f2a',
+  burgundy: '#6e1f2e',
+  pink: '#e88bb5',
+  purple: '#6d4a8f',
+  yellow: '#e5c33d',
+  orange: '#d97b2f',
+  gold: '#c9a136',
+  silver: '#c0c3c9',
+  multi: 'linear-gradient(135deg,#c22f2a 0 33%,#e5c33d 33% 66%,#3a6ea5 66%)',
+};

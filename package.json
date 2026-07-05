@@ -1,0 +1,22 @@
+{
+  "name": "outfit-from-a-vibe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "harvest": "node scripts/harvest.mjs",
+    "embed": "node scripts/embed-catalog.mjs",
+    "check-stylist": "node scripts/check-stylist.mjs",
+    "verify-e2e": "node scripts/verify-e2e.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@huggingface/transformers": "^4.2.0",
+    "next": "^16.2.10",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  }
+}
