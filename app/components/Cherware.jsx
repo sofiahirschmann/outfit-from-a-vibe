@@ -42,7 +42,15 @@ export default function Cherware({ samples, catalogCount, harvestedAt }) {
           filters,
         }),
       });
-      const json = await res.json();
+      // Platform-level failures (timeouts, crashed functions) return HTML, not
+      // JSON — surface those as a readable verdict instead of a parse error.
+      const text = await res.text();
+      let json;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        throw new Error(`The wardrobe computer returned static (HTTP ${res.status}). Run it back in a minute.`);
+      }
       if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
       if (!json.outfits?.length) {
         setError(

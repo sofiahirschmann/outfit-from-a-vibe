@@ -14,3 +14,5 @@ data/.dd-cookies.txt
 CLAUDE.md
 HANDOFF.md
 PLAN.md
+.vercel
+.env*
