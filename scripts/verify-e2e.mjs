@@ -1,5 +1,6 @@
 // Final end-to-end verification against the running dev server.
 // Usage: node final-verify.mjs [baseUrl]
+import fs from 'node:fs';
 const BASE = process.argv[2] ?? 'http://localhost:3456';
 
 let failures = 0;
@@ -97,7 +98,39 @@ console.log('\nfilters: cold weather + casual');
   }
 }
 
-// 6. spot-check that product links resolve on nuuly.com
+// 6. the three looks span a visual range (assembly diversity), not near-twins.
+// Uses the same CLIP embeddings the stylist does, so this is the real signal.
+console.log('\nlook diversity (cross-outfit visual spread)');
+{
+  const emb = JSON.parse(fs.readFileSync(new URL('../data/embeddings.json', import.meta.url))).vectors;
+  const cos = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0);
+  const crossVisual = (A, B) => {
+    const ea = A.map((id) => emb[id]).filter(Boolean);
+    const eb = B.map((id) => emb[id]).filter(Boolean);
+    if (!ea.length || !eb.length) return null;
+    let s = 0, n = 0;
+    for (const x of ea) for (const y of eb) { s += cos(x, y); n++; }
+    return s / n;
+  };
+  // "coastal grandma" is a narrow, neutral vibe — the hardest case to diversify.
+  const { json } = await ask({ vibe: 'coastal grandma' });
+  const looks = (json.outfits ?? []).map((o) => o.items.map((i) => i.id));
+  const sims = [];
+  for (let a = 0; a < looks.length; a++) {
+    for (let b = a + 1; b < looks.length; b++) {
+      const cv = crossVisual(looks[a], looks[b]);
+      if (cv != null) sims.push(cv);
+    }
+  }
+  const mean = sims.reduce((s, x) => s + x, 0) / (sims.length || 1);
+  // Near-twin apparel pairs sit ~0.88, distinct ~0.68. Assembly diversity keeps
+  // even a narrow vibe's three looks clear of the twin ceiling.
+  if (!sims.length) fail('could not measure diversity (no embeddings for shown items)');
+  else if (mean >= 0.82) fail(`three looks are near-twins (cross-outfit visualSim ${mean.toFixed(3)} ≥ 0.82)`);
+  else ok(`three looks span a range (cross-outfit visualSim ${mean.toFixed(3)} < 0.82)`);
+}
+
+// 7. spot-check that product links resolve on nuuly.com
 console.log('\nlive link spot-check');
 {
   const { json } = await ask({ vibe: 'coastal grandma' });
