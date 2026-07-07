@@ -16,3 +16,4 @@ HANDOFF.md
 PLAN.md
 .vercel
 .env*
+data/catalog-full-raw.jsonl

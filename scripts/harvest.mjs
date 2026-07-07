@@ -2,6 +2,12 @@
 // Harvest a seeded catalog from Nuuly's published products sitemap.
 //
 //   node scripts/harvest.mjs [--limit N] [--skip-tag] [--tag-only] [--refresh]
+//   node scripts/harvest.mjs --full              crawl EVERY sitemap product
+//                                                 (with review counts) into
+//                                                 catalog-full-raw.jsonl; resumable
+//   node scripts/harvest.mjs --select-top 5000    pick the N most-reviewed from the
+//                                                 full crawl (slot-balanced), tag,
+//                                                 and write catalog.json
 //
 // Nuuly has no public API; robots.txt disallows /api and /rent/search but
 // publishes /rent/products_sitemap.xml for crawlers (crawl-delay 1s). Each
@@ -25,6 +31,7 @@ const execFileP = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_DIR = path.join(ROOT, 'data');
 const RAW_PATH = path.join(DATA_DIR, 'catalog-raw.jsonl');
+const FULL_RAW_PATH = path.join(DATA_DIR, 'catalog-full-raw.jsonl');
 const OUT_PATH = path.join(DATA_DIR, 'catalog.json');
 
 const args = process.argv.slice(2);
@@ -32,6 +39,8 @@ const LIMIT = args.includes('--limit') ? Number(args[args.indexOf('--limit') + 1
 const SKIP_TAG = args.includes('--skip-tag');
 const TAG_ONLY = args.includes('--tag-only');
 const REFRESH = args.includes('--refresh');
+const FULL = args.includes('--full');
+const SELECT_TOP = args.includes('--select-top') ? Number(args[args.indexOf('--select-top') + 1]) : null;
 
 const BASE = 'https://www.nuuly.com';
 const SEED = 20260703;
@@ -237,6 +246,11 @@ function parseProduct(html, slug) {
     .join('; ')
     .slice(0, 320);
 
+  // Review signal (used to rank the full crawl down to the most-loved pieces).
+  const rs = pd.reviewSummary || {};
+  const reviews = typeof rs.overallRatingCount === 'number' ? rs.overallRatingCount : 0;
+  const rating = typeof rs.overallRatingAverage === 'number' ? rs.overallRatingAverage : 0;
+
   return {
     item: {
       id: String(pd.styleNumber || pd.productId || slug),
@@ -263,6 +277,8 @@ function parseProduct(html, slug) {
         length: facets.length || [],
       },
       desc,
+      reviews,
+      rating,
       harvestedAt: new Date().toISOString().slice(0, 10),
     },
   };
@@ -379,6 +395,102 @@ async function harvest() {
   return items;
 }
 
+// Crawl EVERY product in the sitemap (no quotas) into catalog-full-raw.jsonl,
+// capturing review counts so a later --select-top can keep only the most-loved
+// pieces. Resumable: re-running skips slugs already in the file. Writes to its
+// own raw file so the live catalog.json is never touched during the long crawl.
+async function harvestFull() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const existing = fs.existsSync(FULL_RAW_PATH)
+    ? fs.readFileSync(FULL_RAW_PATH, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    : [];
+  const seen = new Set(existing.map((i) => i.slug));
+  console.log(`full crawl: ${existing.length} apparel items already saved`);
+
+  console.log('fetching sitemap…');
+  const slugs = await fetchSitemapSlugs();
+  let todo = slugs.filter((s) => !seen.has(s));
+  if (LIMIT) todo = todo.slice(0, LIMIT); // validation run
+  console.log(`sitemap: ${slugs.length} urls, ${todo.length} left to fetch`);
+
+  const skips = {};
+  const raw = fs.createWriteStream(FULL_RAW_PATH, { flags: 'a' });
+  let fetched = 0;
+  let accepted = existing.length;
+  let consecutiveErrors = 0;
+  const t0 = Date.now();
+
+  for (const slug of todo) {
+    await throttle();
+    let html;
+    try {
+      html = await fetchPage(`${BASE}/rent/products/${slug}`);
+      consecutiveErrors = 0;
+    } catch (err) {
+      if (err.status === 404) {
+        skips.gone = (skips.gone || 0) + 1; // stale sitemap entry — normal
+        continue;
+      }
+      consecutiveErrors++;
+      skips.fetchError = (skips.fetchError || 0) + 1;
+      console.warn(`  ! ${slug}: ${err.message}`);
+      // Over a ~30k crawl a long error streak means DataDome has us blocked;
+      // stop cleanly and let a re-run (which skips saved slugs) resume later.
+      if (consecutiveErrors >= 25) throw new Error('25 consecutive fetch failures — aborting; re-run --full to resume');
+      continue;
+    }
+    fetched++;
+
+    const { item, skip } = parseProduct(html, slug);
+    if (skip) {
+      skips[skip.split(':')[0]] = (skips[skip.split(':')[0]] || 0) + 1;
+      continue;
+    }
+    raw.write(JSON.stringify(item) + '\n');
+    accepted++;
+
+    if (fetched % 100 === 0) {
+      const rate = fetched / ((Date.now() - t0) / 1000); // fetches/sec this run
+      const etaH = rate > 0 ? (todo.length - fetched) / rate / 3600 : 0;
+      console.log(
+        `  fetched ${fetched}/${todo.length}, ${accepted} apparel kept, ~${etaH.toFixed(1)}h left`,
+      );
+    }
+  }
+  raw.end();
+
+  console.log(`\nfull crawl done: ${accepted} apparel items in ${path.basename(FULL_RAW_PATH)} (${fetched} fetched this run)`);
+  if (Object.keys(skips).length) console.log('skips:', skips);
+  return accepted;
+}
+
+// Pick the `total` most-reviewed items, balanced across slots so the stylist can
+// still build complete outfits (a pure global top-N skews to dresses and starves
+// bottoms/outerwear). Proportions mirror the seeded closet's slot mix; within
+// each slot we take the highest review counts, then backfill any shortfall from
+// the most-reviewed leftovers anywhere.
+const SLOT_MIX = { top: 0.262, bottom: 0.230, dress: 0.197, onepiece: 0.066, outerwear: 0.131, layer: 0.115 };
+
+function selectTopByReviews(items, total) {
+  const bySlot = {};
+  for (const it of items) (bySlot[it.slot] ??= []).push(it);
+  const byReviews = (a, b) => (b.reviews || 0) - (a.reviews || 0);
+
+  const chosen = [];
+  const leftovers = [];
+  for (const slot of Object.keys(SLOT_MIX)) {
+    const pool = (bySlot[slot] || []).sort(byReviews);
+    const quota = Math.round(SLOT_MIX[slot] * total);
+    chosen.push(...pool.slice(0, quota));
+    leftovers.push(...pool.slice(quota));
+  }
+  if (chosen.length < total) {
+    leftovers.sort(byReviews);
+    chosen.push(...leftovers.slice(0, total - chosen.length));
+  }
+  return chosen;
+}
+
 // ---------------------------------------------------------------------------
 // LLM attribute tagging: palette / formality / statement / fit per item.
 // Batched; results merged into the final catalog.json.
@@ -464,8 +576,35 @@ async function tagItems(items) {
   return items;
 }
 
+function loadFullRaw() {
+  if (!fs.existsSync(FULL_RAW_PATH)) return [];
+  return fs.readFileSync(FULL_RAW_PATH, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+}
+
 async function main() {
-  const items = TAG_ONLY ? loadRaw() : await harvest();
+  // --full: just crawl everything into the full raw file, then stop. Selection,
+  // tagging, and catalog.json are a separate --select-top pass so the crawl can
+  // run detached for hours without touching the live catalog.
+  if (FULL) {
+    const n = await harvestFull();
+    console.log(`\nnext: node scripts/harvest.mjs --select-top 5000  (have ${n} apparel items)`);
+    return;
+  }
+
+  let items;
+  if (SELECT_TOP) {
+    const all = loadFullRaw();
+    if (!all.length) throw new Error(`no full crawl at ${FULL_RAW_PATH} — run --full first`);
+    items = selectTopByReviews(all, SELECT_TOP);
+    const bySlot = {};
+    for (const i of items) bySlot[i.slot] = (bySlot[i.slot] || 0) + 1;
+    const revs = items.map((i) => i.reviews || 0);
+    console.log(`selected ${items.length} of ${all.length} by review count`);
+    console.log('slots:', bySlot);
+    console.log(`reviews: max ${Math.max(...revs)}, lowest kept ${Math.min(...revs)}`);
+  } else {
+    items = TAG_ONLY ? loadRaw() : await harvest();
+  }
   if (!items.length) throw new Error('no items harvested');
   // Carry over tags already written to catalog.json so an interrupted tagging
   // pass resumes instead of re-tagging (and re-billing) everything.
@@ -485,7 +624,9 @@ async function main() {
     OUT_PATH,
     JSON.stringify(
       {
-        source: 'nuuly.com products sitemap (one-time seeded harvest)',
+        source: SELECT_TOP
+          ? `nuuly.com full products sitemap, ${SELECT_TOP} most-reviewed kept (slot-balanced)`
+          : 'nuuly.com products sitemap (one-time seeded harvest)',
         harvestedAt: new Date().toISOString().slice(0, 10),
         count: finalItems.length,
         items: finalItems,
